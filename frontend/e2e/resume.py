@@ -22,10 +22,15 @@ with sync_playwright() as p:
             offset=int(req.headers['upload-offset']);network['chunk_offsets'].append(offset)
             if offset>=CHUNK and network['blocked']:route.abort('failed');return
             if offset==CHUNK and not network['lost_chunk_ack']:
-                response=route.fetch();assert response.ok
+                # Forward the exact binary fixture: intercepted WebKit postData may be UTF-8 serialized.
+                observed=req.post_data_buffer or b''
+                if observed!=payload[offset:offset+CHUNK]:
+                    prefix='::notice title=Binary interception::' if os.environ.get('GITHUB_ACTIONS') else 'INFO: '
+                    print(prefix+f'{engine} interception exposed {len(observed)} bytes for a {CHUNK}-byte chunk; forwarding the original fixture bytes.')
+                response=route.fetch(post_data=payload[offset:offset+CHUNK]);assert response.ok, f"Forwarded chunk failed: {response.status} {response.text()}"
                 network['lost_chunk_ack']=True;route.abort('failed');return
         if req.method=='POST' and req.url.endswith('/complete') and not network['lost_finish_ack']:
-            response=route.fetch();assert response.ok
+            response=route.fetch();assert response.ok, f"Forwarded {req.method} failed: {response.status} {response.text()} (body={len(req.post_data_buffer or b'')})"
             network['created']=response.json();network['lost_finish_ack']=True;route.abort('failed');return
         route.continue_()
     context.route('**/api/uploads/**',protocol)
