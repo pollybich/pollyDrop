@@ -7,7 +7,7 @@
 
 Temporary file and text transfers without registration. Set a lifetime, a download limit and an optional password, then share the recipient link. A separate secret management link lets you check the status and revoke access.
 
-**Current beta: v0.1.0-beta.3.** React + TypeScript, Java 21 + Spring Boot, PostgreSQL and Docker. A responsive light interface with frosted glass, editorial typography and subtle motion, respecting reduced-motion preferences.
+**Current beta: v0.1.0-beta.4.** React + TypeScript, Java 21 + Spring Boot, PostgreSQL and Docker. A responsive light interface with frosted glass, editorial typography and subtle motion, respecting reduced-motion preferences.
 
 ## ✳ Interface
 
@@ -75,6 +75,14 @@ The script preserves secrets and volumes, downloads the SHA-256-verified release
 If the old 24-hour interface persists, run `./deploy/server/update-interface.sh` to apply a checked prebuilt snapshot without Node.js compilation and verify the served JavaScript.
 
 `--frontend-from-source` remains compatible. The released frontend is the default; `--frontend-from-source` explicitly compiles the checkout.
+
+## Resumable transfers
+
+File uploads are encrypted in 1 MiB parts. Browser storage retains only a capability, file fingerprint, settings and acknowledged offset, never file contents or the plaintext password. Select the same file after reopening the page; SHA-256 validates its contents before continuing. Server progress survives a backend restart. Browser storage must remain available; clearing it removes local recovery details.
+
+The original retention deadline begins when the upload session is created and never moves on retry. Abandoned encrypted parts expire too. File size remains limited to 25 MiB.
+
+Native downloads support a single HTTP Range and a stable ETag. Partial responses and retries within one unfinished download session consume one allowance only after complete server delivery. HEAD consumes none. Download-manager resume support varies by browser; a full HTTP 200 restarts safely if the requested offset cannot be confirmed. Once the server has completed its delivery and erased the last permitted copy, a later browser/proxy failure cannot recover that copy. The server cannot verify that a device saved the file.
 
 ## Development
 

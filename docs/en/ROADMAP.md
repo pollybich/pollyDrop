@@ -72,3 +72,11 @@ New features are assessed against security and solo-maintainer capacity. Permane
 - [x] Local IPv4/IPv6 country lookup for initial language.
 - [x] One-hour default in the released frontend.
 - [x] Checked binary updates and migration preserving keys, files and counters.
+
+## v0.1.0-beta.4
+
+- [x] Encrypted chunk uploads with durable database progress.
+- [x] Page/backend restart recovery with original-file SHA-256 verification.
+- [x] Idempotent chunk and transfer-finalization acknowledgement.
+- [x] HTTP Range downloads, stable ETag and one allowance per completed session.
+- [x] Abandoned-upload cleanup at the original deadline, without extending retention.

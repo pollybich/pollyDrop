@@ -48,6 +48,10 @@ export function t(input: string, variables?: Record<string, unknown>): string {
   return variables ? value.replace(/\{([^}]+)\}/g, (match, name: string) => String(variables[name] ?? match)) : value
 }
 const apiErrors: Record<string, string> = {
+  UPLOAD_PAUSED: 'Связь прервалась. Прогресс сохранён. Продолжите загрузку, когда соединение восстановится.',
+  UPLOAD_MISMATCH: 'Выберите исходный файл или начните новую загрузку.', UPLOAD_OFFSET: 'Прогресс загрузки изменился. Повторите попытку.',
+  UPLOAD_INCOMPLETE: 'Дождитесь окончания загрузки.', CHECKSUM_MISMATCH: 'Проверка файла не прошла. Начните новую загрузку.',
+  UPLOAD_EXPIRED: 'Срок загрузки истёк. Начните новую передачу.', UPLOAD_NOT_FOUND: 'Загрузка не найдена. Начните новую передачу.',
   WRONG_PASSWORD: 'Пароль не подошёл.', PASSWORD_REQUIRED: 'Введите пароль от отправителя.',
   IN_PROGRESS: 'Передача уже открыта другим получателем. Попробуйте позже.', SERVER_BUSY: 'Сервис занят. Попробуйте через минуту.',
   PASSWORD_LOCKED: 'Слишком много попыток. Попробуйте позже.', NOT_READY: 'Сервис запускается. Попробуйте через несколько секунд.',

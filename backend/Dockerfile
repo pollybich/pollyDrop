@@ -13,7 +13,7 @@ RUN --mount=type=cache,target=/root/.m2 \
 FROM eclipse-temurin:21-jre-alpine
 RUN addgroup -S app && adduser -S app -G app && mkdir -p /data/files && chown -R app:app /data
 WORKDIR /app
-COPY --from=build /app/target/pollydrop-0.1.0-beta.3.jar app.jar
+COPY --from=build /app/target/pollydrop-0.1.0-beta.4.jar app.jar
 USER app
 EXPOSE 8080
 ENTRYPOINT ["java", "-XX:MaxRAMPercentage=70", "-jar", "app.jar"]

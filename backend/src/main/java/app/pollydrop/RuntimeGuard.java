@@ -12,15 +12,18 @@ import java.util.stream.Collectors;
 @Component
 public class RuntimeGuard implements ApplicationRunner {
     private final DataSource dataSource;private final TransferService transfers;private final TransferRepository repository;private final CipherStorage storage;
+    private final UploadJanitor uploads;private final DownloadTickets tickets;
     private volatile boolean ready=false;private Connection lock;
-    public RuntimeGuard(DataSource dataSource,TransferService transfers,TransferRepository repository,CipherStorage storage){this.dataSource=dataSource;this.transfers=transfers;this.repository=repository;this.storage=storage;}
+    public RuntimeGuard(DataSource dataSource,TransferService transfers,TransferRepository repository,CipherStorage storage,UploadJanitor uploads,DownloadTickets tickets){this.dataSource=dataSource;this.transfers=transfers;this.repository=repository;this.storage=storage;this.uploads=uploads;this.tickets=tickets;}
     @Override public void run(ApplicationArguments args)throws Exception {
         lock=dataSource.getConnection();
         try(var statement=lock.createStatement();var result=statement.executeQuery("SELECT pg_try_advisory_lock(7314862904521)")) {
             result.next();if(!result.getBoolean(1)){lock.close();throw new IllegalStateException("This beta supports one backend instance per database");}
         }
         // The database lock proves that a previous process can no longer own a sending lease.
-        transfers.recover();storage.removeOrphans(repository.findAll().stream().map(t->t.id).collect(Collectors.toSet()));transfers.cleanup();transfers.restoreExpirations();ready=true;
+        transfers.recover();tickets.recover();
+        var known=repository.findAll().stream().map(t->t.id).collect(Collectors.toSet());known.addAll(uploads.retainedIds());storage.removeOrphans(known);
+        transfers.cleanup();transfers.restoreExpirations();ready=true;uploads.activate(this::ready);
     }
     public synchronized boolean ready(){
         if(!ready)return false;

@@ -47,13 +47,16 @@ jobs:
         run: |
           python frontend/e2e/smoke.py
           python frontend/e2e/languages.py
+          python frontend/e2e/resume.py
         env:
           BASE_URL: http://127.0.0.1:8088
           BROWSER: chromium
+          RESUME_RESTART_PROJECT: pollydrop-beta
       - name: WebKit with iPhone emulation
         run: |
           python frontend/e2e/smoke.py
           python frontend/e2e/languages.py
+          python frontend/e2e/resume.py
         env:
           BASE_URL: http://127.0.0.1:8088
           BROWSER: webkit

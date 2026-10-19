@@ -209,3 +209,9 @@ h2 { margin: 0; font-size: 31px; line-height: 1.2; letter-spacing: -1.4px; font-
 .geoip-credit { font-size: 8px; text-decoration-color: #8c9b5f3d; text-underline-offset: 3px; }
 .header-actions { gap: 18px; }
 @media (max-width: 640px) { .header-actions { gap: 8px; } .help-button > span:first-child { display: none; } .site-footer { flex-wrap: wrap; gap: 14px; } .geoip-credit { order: 3; width: 100%; text-align: center; } }
+
+.resume-notice { margin: 0 0 18px; padding: 15px 17px; border-radius: 18px; border: 1px solid rgba(139,159,87,.25); background: rgba(218,243,162,.15); display: grid; gap: 6px; overflow-wrap: anywhere; }
+.resume-notice strong { font-size: 14px; }
+.resume-notice > span, .resume-notice p, .upload-message { font-size: 12px; color: var(--muted, #767e6c); line-height: 1.6; margin: 0; }
+.resume-notice .text-button { justify-self: start; }
+.upload-message { margin-bottom: 8px; }

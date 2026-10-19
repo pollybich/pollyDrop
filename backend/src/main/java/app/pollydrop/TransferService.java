@@ -37,18 +37,28 @@ public class TransferService {
         if(contents==null || contents.length==0) throw new ApiFailure(400,"EMPTY_CONTENT","Добавьте файл или текст.");
         if(contents.length>(text?65536:maxBytes)) throw new ApiFailure(413,"TOO_LARGE",text?"Текст должен быть не больше 64 КБ.":"Файл должен быть не больше 25 МБ.");
         if(options.password!=null && options.password.length()>128) throw new ApiFailure(400,"INVALID_PASSWORD","Пароль слишком длинный.");
-        String read=Tokens.newToken(),manage=Tokens.newToken();
-        Transfer t=new Transfer();t.id=UUID.randomUUID();t.readHash=Tokens.hash(read);t.manageHash=Tokens.hash(manage);t.kind=text?"TEXT":"FILE";
-        String name=text?(options.name==null||options.name.isBlank()?"Текстовая передача":options.name):(filename==null?"Файл":filename);
+        return store(text?"TEXT":"FILE",contents,text?options.name:filename,options.maxDownloads,
+            options.password!=null&&!options.password.isEmpty()?passwords.encode(options.password):null,
+            Instant.now(),null,options.ttlSeconds,Tokens.newToken(),Tokens.newToken());
+    }
+    @Transactional
+    public Created createUploaded(Upload upload,byte[] contents,String read,String manage)throws IOException {
+        return store("FILE",contents,upload.name,upload.maxDownloads,upload.passwordHash,upload.createdAt,upload.expiresAt,0,read,manage);
+    }
+    private Created store(String kind,byte[] contents,String filename,int limit,String passwordHash,Instant createdAt,Instant expiresAt,int ttl,String read,String manage)throws IOException {
+        Transfer t=new Transfer();t.id=UUID.randomUUID();t.readHash=Tokens.hash(read);t.manageHash=Tokens.hash(manage);t.kind=kind;
+        boolean text="TEXT".equals(kind);
+        String name=filename==null||filename.isBlank()?(text?"Текстовая передача":"Файл"):filename;
         name=name.replace('\\','/');name=name.substring(name.lastIndexOf('/')+1).replaceAll("[\\p{Cntrl}]","").strip();
         t.name=name.isBlank()?"Передача":name.substring(0,Math.min(name.length(),240));
-        t.mediaType=text?"text/plain; charset=utf-8":"application/octet-stream";t.byteSize=contents.length;t.createdAt=Instant.now();t.expiresAt=t.createdAt.plusSeconds(options.ttlSeconds);t.maxDownloads=options.maxDownloads;
-        if(options.password!=null && !options.password.isEmpty())t.passwordHash=passwords.encode(options.password);
+        t.mediaType=text?"text/plain; charset=utf-8":"application/octet-stream";t.byteSize=contents.length;t.createdAt=createdAt;t.expiresAt=expiresAt==null?createdAt.plusSeconds(ttl):expiresAt;t.maxDownloads=limit;t.passwordHash=passwordHash;
         storage.write(t.id,contents);
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization(){@Override public void afterCommit(){expiry.schedule(t.id,t.expiresAt);}@Override public void afterCompletion(int status){if(status!=STATUS_COMMITTED)try{storage.delete(t.id);}catch(IOException ignored){}}});
         repository.saveAndFlush(t);log.info("transfer_created id={} kind={}",t.id,t.kind);
         return new Created(read,manage,view(t,true));
     }
+    @Transactional(readOnly=true) public UUID idForOwner(String secret){return repository.findByManageHash(Tokens.hash(secret)).orElseThrow(TransferService::missing).id;}
+    @Transactional(readOnly=true) public View authorizedView(UUID id){Transfer t=repository.findById(id).orElseThrow(TransferService::missing);requireAvailable(t);return view(t,true);}
     @Transactional(readOnly=true)
     public View publicView(String token) { return view(repository.findByReadHash(Tokens.hash(token)).orElseThrow(TransferService::missing),false); }
     @Transactional(readOnly=true)
@@ -72,6 +82,12 @@ public class TransferService {
         Transfer t=repository.lockId(id).orElseThrow(TransferService::missing);
         requireAvailable(t);
         if(t.activeLease!=null)throw new ApiFailure(409,"IN_PROGRESS","Передача уже открыта. Попробуйте после завершения.");
+        return reserveRow(t);
+    }
+    @Transactional
+    public Lease reserveForSession(UUID id,UUID previousLease){
+        Transfer t=repository.lockId(id).orElseThrow(TransferService::missing);requireAvailable(t);
+        if(t.activeLease!=null&&!t.activeLease.equals(previousLease))throw new ApiFailure(409,"IN_PROGRESS","Передача уже открыта. Попробуйте после завершения.");
         return reserveRow(t);
     }
     private Lease reserveRow(Transfer t){

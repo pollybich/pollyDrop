@@ -15,7 +15,7 @@ cd /opt/pollydrop
 ./deploy/server/install-debian.sh
 ```
 
-Inspect existing directories first. The installer adds a missing official Compose release with SHA-256 verification, downloads checked `v0.1.0-beta.3` backend/frontend assets and packages them into containers. No host Java or Node.js compiler is needed.
+Inspect existing directories first. The installer adds a missing official Compose release with SHA-256 verification, downloads checked `v0.1.0-beta.4` backend/frontend assets and packages them into containers. No host Java or Node.js compiler is needed.
 
 `.env` is generated locally once; updates preserve the encryption key and database password. Generated builds stay in ignored `.runtime/server`. PostgreSQL/backend are private, frontend binds `127.0.0.1:8088`, and Caddy obtains/renews certificates for `drop.pollybich.ru` using HTTP/1.1 and HTTP/2.
 
@@ -57,7 +57,7 @@ curl --fail https://drop.pollybich.ru/api/health
 docker compose -p pollydrop-public -f compose.yaml -f deploy/server/compose.server.yaml logs --tail=50 backend caddy
 ```
 
-Expect `status: ok` and `version: 0.1.0-beta.3`. Check the form, RU / EN switch and a test transfer. Refresh only the interface of an already migrated installation:
+Expect `status: ok` and `version: 0.1.0-beta.4`. Check the form, RU / EN switch and a test transfer. Refresh only the interface of an already migrated installation:
 
 ```bash
 ./deploy/server/update-interface.sh

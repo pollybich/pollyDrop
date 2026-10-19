@@ -38,6 +38,7 @@ class TransferIntegrationTest {
     @Autowired CipherStorage storage;
     @Autowired MockMvc http;
     @Autowired ObjectMapper json;
+    @Autowired org.springframework.transaction.PlatformTransactionManager transactionManager;
     TransferService.Created text(String password,int limit)throws IOException {return service.create(new TransferService.Options("TEXT","Привет 👋 <script>alert(1)</script>",null,600,limit,password),null,null);}
     Transfer row(TransferService.Created c){return repository.findByReadHash(Tokens.hash(c.readToken())).orElseThrow();}
     void failure(Runnable action,int status,String code){assertThatThrownBy(action::run).isInstanceOfSatisfying(ApiFailure.class,e->{assertThat(e.status).isEqualTo(status);assertThat(e.code).isEqualTo(code);});}
@@ -118,6 +119,10 @@ class TransferIntegrationTest {
         try(var entries=Files.list(tiny)){assertThat(entries.count()).isZero();}Files.delete(tiny);
     }
     @Autowired DownloadTickets tickets;
+    @Autowired DownloadSessionRepository sessions;
+    @Autowired UploadService uploads;
+    @Autowired UploadRepository uploadRows;
+    @Autowired UploadJanitor uploadJanitor;
     @Autowired ExpiryScheduler expiry;
     @Test void nativeTicketChecksPasswordAndHeadDoesNotSpendIt()throws Exception {
         var c=service.create(new TransferService.Options("FILE",null,null,600,1,"secret"),new byte[]{0,1,2},"проверка.bin");
@@ -126,7 +131,7 @@ class TransferIntegrationTest {
             .andExpect(status().isUnauthorized());
         var issued=tickets.issue(c.readToken(),"secret","ticket-client");
         assertThat(service.publicView(c.readToken()).downloads()).isZero();
-        http.perform(head(issued.url())).andExpect(status().isMethodNotAllowed());
+        http.perform(head(issued.url())).andExpect(status().isOk());
         http.perform(get(issued.statusUrl())).andExpect(status().isOk()).andExpect(jsonPath("state").value("READY"));
         http.perform(get(issued.url())).andExpect(status().isOk()).andExpect(header().string("Content-Disposition",org.hamcrest.Matchers.containsString("attachment"))).andExpect(content().bytes(new byte[]{0,1,2}));
         http.perform(get(issued.url())).andExpect(status().isGone());
@@ -145,10 +150,10 @@ class TransferIntegrationTest {
     @Test void ticketExpiresWithoutSpendingDownload()throws Exception {
         var c=text(null,1);java.time.Clock clock=org.mockito.Mockito.mock(java.time.Clock.class);
         Instant now=Instant.now();org.mockito.Mockito.when(clock.instant()).thenReturn(now);
-        var local=new DownloadTickets(service,clock);var issued=local.issue(c.readToken(),null,"test");
+        var local=new DownloadTickets(service,sessions,clock);var issued=local.issue(c.readToken(),null,"test");
         org.mockito.Mockito.when(clock.instant()).thenReturn(now.plusSeconds(61));
         String token=issued.url().substring(issued.url().lastIndexOf('/')+1);
-        failure(()->local.begin(token),410,"DOWNLOAD_EXPIRED");
+        new org.springframework.transaction.support.TransactionTemplate(transactionManager).executeWithoutResult(status->failure(()->local.begin(token),410,"DOWNLOAD_EXPIRED"));
         assertThat(service.publicView(c.readToken()).downloads()).isZero();
     }
     @Test void lastDownloadDeletesImmediatelyButEarlierDownloadsKeepContent()throws Exception {
@@ -172,6 +177,89 @@ class TransferIntegrationTest {
         assertThatThrownBy(()->service.create(new TransferService.Options("TEXT","x",null,604800,1,null),null,null)).isInstanceOfSatisfying(ApiFailure.class,e->assertThat(e.status).isEqualTo(400));
         var c=service.create(new TransferService.Options("TEXT","x",null,172800,1,null),null,null);
         assertThat(java.time.Duration.between(c.transfer().createdAt(),c.transfer().expiresAt()).toSeconds()).isEqualTo(172800);
+    }
+
+    String digest(byte[] data)throws Exception{return HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(data));}
+    UploadService.Start uploadOptions(byte[] bytes,String password)throws Exception{return new UploadService.Start("resume.bin",bytes.length,digest(bytes),600,1,password);}
+    byte[] sample(int length){byte[] bytes=new byte[length];new Random(19).nextBytes(bytes);return bytes;}
+    @Test void chunkUploadSurvivesLostResponsesAndFinalizationIsIdempotent()throws Exception {
+        byte[] bytes=sample(UploadJanitor.CHUNK_SIZE+12345);String secret=Tokens.newToken();
+        var initial=uploads.start(secret,uploadOptions(bytes,"upload-secret"));
+        assertThat(uploads.start(secret,uploadOptions(bytes,"upload-secret")).offset()).isZero();
+        byte[] first=Arrays.copyOfRange(bytes,0,UploadJanitor.CHUNK_SIZE);
+        uploads.append(secret,0,first);uploads.append(secret,0,first);
+        assertThat(uploads.status(secret).offset()).isEqualTo(UploadJanitor.CHUNK_SIZE);
+        var stored=uploadRows.findBySecretHash(Tokens.hash(secret)).orElseThrow();
+        assertThat(stored.passwordHash).startsWith("$argon2id$");
+        assertThat(Files.readAllBytes(STORE.resolve(UploadJanitor.part(stored.id,0)+".enc"))).isNotEqualTo(first);
+        var known=new HashSet<UUID>();for(var t:repository.findAll())known.add(t.id);known.addAll(uploadJanitor.retainedIds());storage.removeOrphans(known);
+        uploads.append(secret,UploadJanitor.CHUNK_SIZE,Arrays.copyOfRange(bytes,UploadJanitor.CHUNK_SIZE,bytes.length));
+        var created=uploads.complete(secret);var again=uploads.complete(secret);
+        assertThat(created.readToken()).isEqualTo(again.readToken());assertThat(created.manageToken()).isEqualTo(again.manageToken());
+        assertThat(created.transfer().expiresAt()).isEqualTo(again.transfer().expiresAt());
+        assertThat(java.time.Duration.between(initial.expiresAt(),created.transfer().expiresAt()).abs().toMillis()).isZero();
+        assertThat(Files.exists(STORE.resolve(UploadJanitor.part(stored.id,0)+".enc"))).isFalse();
+        var out=new ByteArrayOutputStream();delivery.send(service.reserve(created.readToken(),"upload-secret","upload-test"),out);assertThat(out.toByteArray()).isEqualTo(bytes);
+    }
+    @Test void uploadRejectsChangedChunksWrongChecksumAndMissingParts()throws Exception {
+        byte[] bytes=sample(UploadJanitor.CHUNK_SIZE+10);String secret=Tokens.newToken();uploads.start(secret,uploadOptions(bytes,null));
+        failure(()->{try{uploads.complete(secret);}catch(IOException e){throw new UncheckedIOException(e);}},409,"UPLOAD_INCOMPLETE");
+        uploads.append(secret,0,Arrays.copyOfRange(bytes,0,UploadJanitor.CHUNK_SIZE));
+        byte[] changed=Arrays.copyOfRange(bytes,0,UploadJanitor.CHUNK_SIZE);changed[0]^=1;
+        failure(()->{try{uploads.append(secret,0,changed);}catch(IOException e){throw new UncheckedIOException(e);}},409,"UPLOAD_MISMATCH");
+        byte[] wrongTail=new byte[10];uploads.append(secret,UploadJanitor.CHUNK_SIZE,wrongTail);
+        failure(()->{try{uploads.complete(secret);}catch(IOException e){throw new UncheckedIOException(e);}},422,"CHECKSUM_MISMATCH");
+        assertThat(uploads.status(secret).completed()).isFalse();uploads.cancel(secret);
+        assertThat(uploadRows.findBySecretHash(Tokens.hash(secret))).isEmpty();
+    }
+    @Test void unfinishedUploadExpiresAndErasesItsEncryptedParts()throws Exception {
+        byte[] bytes=sample(100);String secret=Tokens.newToken();uploads.start(secret,uploadOptions(bytes,null));uploads.append(secret,0,bytes);
+        var u=uploadRows.findBySecretHash(Tokens.hash(secret)).orElseThrow();var path=STORE.resolve(UploadJanitor.part(u.id,0)+".enc");assertThat(Files.exists(path)).isTrue();
+        u.expiresAt=Instant.now().minusSeconds(1);uploadRows.saveAndFlush(u);uploadJanitor.cleanup();
+        assertThat(Files.exists(path)).isFalse();assertThat(uploadRows.findById(u.id)).isEmpty();
+    }
+    @Test void uploadHttpProtocolAndSecretSeparation()throws Exception {
+        byte[] bytes=sample(10000);String secret=Tokens.newToken();
+        http.perform(put("/api/uploads/"+secret).contentType("application/json").content(json.writeValueAsBytes(uploadOptions(bytes,null)))).andExpect(status().isOk()).andExpect(jsonPath("offset").value(0));
+        http.perform(patch("/api/uploads/"+secret).header("Upload-Offset",0).contentType("application/octet-stream").content(bytes)).andExpect(status().isOk()).andExpect(jsonPath("offset").value(bytes.length));
+        var response=http.perform(post("/api/uploads/"+secret+"/complete")).andExpect(status().isOk()).andReturn().getResponse();
+        var created=json.readValue(response.getContentAsByteArray(),TransferService.Created.class);
+        assertThat(created.readToken()).isNotEqualTo(secret).isNotEqualTo(created.manageToken());
+        http.perform(get("/api/manage/"+secret)).andExpect(status().isNotFound());
+        http.perform(get("/api/uploads/"+created.readToken())).andExpect(status().isNotFound());
+    }
+    @Test void rangesJoinIntoOneDownloadAndLastRangeDeletesContent()throws Exception {
+        byte[] bytes=sample(200000);var c=service.create(new TransferService.Options("FILE",null,null,600,1,null),bytes,"range.bin");var id=row(c).id;var ticket=tickets.issue(c.readToken(),null,"ranges");
+        var first=http.perform(get(ticket.url()).header("Range","bytes=0-65535")).andExpect(status().isPartialContent()).andExpect(header().string("Content-Range","bytes 0-65535/200000")).andExpect(content().bytes(Arrays.copyOfRange(bytes,0,65536))).andReturn();
+        String etag=first.getResponse().getHeader("ETag");assertThat(service.publicView(c.readToken()).downloads()).isZero();assertThat(Files.exists(STORE.resolve(id+".enc"))).isTrue();
+        http.perform(head(ticket.url())).andExpect(status().isOk());
+        http.perform(get(ticket.url()).header("Range","bytes=200000-")).andExpect(status().isRequestedRangeNotSatisfiable()).andExpect(header().string("Content-Range","bytes */200000"));
+        http.perform(get(ticket.url()).header("Range","bytes=60000-").header("If-Range",etag)).andExpect(status().isPartialContent()).andExpect(content().bytes(Arrays.copyOfRange(bytes,60000,bytes.length)));
+        assertThat(service.manageView(c.manageToken()).downloads()).isEqualTo(1);assertThat(Files.exists(STORE.resolve(id+".enc"))).isFalse();
+        http.perform(get(ticket.url())).andExpect(status().isGone());http.perform(get(ticket.statusUrl())).andExpect(jsonPath("state").value("SENT"));
+    }
+    @Test void realStreamFailureCanContinueWithSameCapability()throws Exception {
+        byte[] bytes=sample(300000);var c=service.create(new TransferService.Options("FILE",null,null,600,1,null),bytes,"disconnect.bin");var issued=tickets.issue(c.readToken(),null,"failure");String secret=issued.url().substring(issued.url().lastIndexOf('/')+1);var ticket=tickets.begin(secret);long[] sent={0};
+        OutputStream broken=new OutputStream(){int written;public void write(int value)throws IOException{if(++written>70000)throw new IOException("simulated network loss");}};
+        try{delivery.sendRange(ticket.lease(),broken,0,bytes.length-1,offset->{sent[0]=offset;tickets.checkpoint(ticket,0,offset);});fail("Expected disconnect");}catch(IOException expected){tickets.finish(ticket,false,0,sent[0]);}
+        assertThat(sent[0]).isEqualTo(65536);assertThat(service.publicView(c.readToken()).downloads()).isZero();
+        service.recover();tickets.recover();
+        http.perform(get(issued.url()).header("Range","bytes="+sent[0]+"-")).andExpect(status().isPartialContent()).andExpect(content().bytes(Arrays.copyOfRange(bytes,(int)sent[0],bytes.length)));
+        assertThat(service.manageView(c.manageToken()).downloads()).isEqualTo(1);
+    }
+    @Test void unverifiedOffsetAndChangedValidatorRestartSafely()throws Exception {
+        byte[] bytes=sample(1000);var c=service.create(new TransferService.Options("FILE",null,null,600,3,null),bytes,"restart.bin");var issued=tickets.issue(c.readToken(),null,"restart");
+        http.perform(get(issued.url()).header("Range","bytes=500-")).andExpect(status().isOk()).andExpect(content().bytes(bytes));
+        var second=tickets.issue(c.readToken(),null,"restart");
+        http.perform(get(second.url()).header("Range","bytes=0-9").header("If-Range","\"stale\"")).andExpect(status().isOk()).andExpect(content().bytes(bytes));
+        assertThat(service.manageView(c.manageToken()).downloads()).isEqualTo(2);
+    }
+    @Test void oneSessionCanReplaceOnlyItsOwnInterruptedStream()throws Exception {
+        var c=service.create(new TransferService.Options("FILE",null,null,600,3,null),sample(1000),"takeover.bin");var a=tickets.issue(c.readToken(),null,"a");var b=tickets.issue(c.readToken(),null,"b");String keyA=a.url().substring(a.url().lastIndexOf('/')+1),keyB=b.url().substring(b.url().lastIndexOf('/')+1);
+        var old=tickets.begin(keyA);failure(()->tickets.begin(keyB),409,"IN_PROGRESS");var replacement=tickets.begin(keyA);
+        assertThat(tickets.checkpoint(old,0,1000)).isFalse();tickets.finish(old,true,0,1000);assertThat(service.manageView(c.manageToken()).downloads()).isZero();
+        delivery.sendRange(replacement.lease(),OutputStream.nullOutputStream(),0,999,offset->tickets.checkpoint(replacement,0,offset));tickets.finish(replacement,true,0,1000);
+        assertThat(service.manageView(c.manageToken()).downloads()).isEqualTo(1);
     }
 
 }
